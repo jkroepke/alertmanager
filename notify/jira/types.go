@@ -35,7 +35,7 @@ type issueFields struct {
 	Summary     string        `json:"summary"`
 	Status      *issueStatus  `json:"status,omitempty"`
 
-	Fields map[string]any `json:"-"`
+	Fields map[string]any `json:"fields"`
 }
 
 type idNameValue struct {

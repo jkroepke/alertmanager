@@ -26,14 +26,13 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	commoncfg "github.com/prometheus/common/config"
-	"github.com/prometheus/common/model"
-	"github.com/trivago/tgo/tcontainer"
-
+	jsoniter "github.com/json-iterator/go"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
+	commoncfg "github.com/prometheus/common/config"
+	"github.com/prometheus/common/model"
 )
 
 const (
@@ -144,13 +143,6 @@ func (n *Notifier) prepareIssueRequestBody(ctx context.Context, tmplTextFunc tem
 		return issue{}, fmt.Errorf("template error: %w", err)
 	}
 
-	// Recursively convert any maps to map[string]interface{}, filtering out all non-string keys, so the json encoder
-	// doesn't blow up when marshaling JIRA requests.
-	fieldsWithStringKeys, err := tcontainer.ConvertToMarshalMap(n.conf.Fields, func(v string) string { return v })
-	if err != nil {
-		return issue{}, fmt.Errorf("convertToMarshalMap error: %w", err)
-	}
-
 	summary, truncated := notify.TruncateInRunes(summary, maxSummaryLenRunes)
 	if truncated {
 		key, err := notify.ExtractGroupKey(ctx)
@@ -165,7 +157,7 @@ func (n *Notifier) prepareIssueRequestBody(ctx context.Context, tmplTextFunc tem
 		Issuetype: &idNameValue{Name: n.conf.IssueType},
 		Summary:   summary,
 		Labels:    make([]string, 0),
-		Fields:    fieldsWithStringKeys,
+		Fields:    n.conf.Fields,
 	}}
 
 	issueDescriptionString, err := tmplTextFunc(n.conf.Description)
@@ -295,18 +287,21 @@ func (n *Notifier) transitionIssue(key notify.Key, issueKey, transitionName stri
 }
 
 func (n *Notifier) doAPIRequest(method, path string, requestBody any) ([]byte, bool, error) {
-	var body io.Reader
-	if requestBody != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(requestBody); err != nil {
-			return nil, false, err
-		}
+	var (
+		body []byte
+		err  error
+	)
 
-		body = &buf
+	if requestBody != nil {
+		// stdlib json doesn't support map[string]interface{} while jsoniter does
+		body, err = jsoniter.Marshal(requestBody)
+		if err != nil {
+			return nil, false, fmt.Errorf("error marshalling request body: %w", err)
+		}
 	}
 
 	url := n.conf.APIURL.JoinPath(path)
-	req, err := http.NewRequest(method, url.String(), body)
+	req, err := http.NewRequest(method, url.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, false, err
 	}
@@ -316,14 +311,14 @@ func (n *Notifier) doAPIRequest(method, path string, requestBody any) ([]byte, b
 
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("error sending request: %w", err)
 	}
 
 	defer notify.Drain(resp)
 
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("error reading response body: %w", err)
 	}
 
 	shouldRetry, err := n.retrier.Check(resp.StatusCode, bytes.NewReader(responseBody))
